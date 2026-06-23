@@ -139,13 +139,13 @@ impl Index {
     }
 
     pub fn insert_vec(&mut self, vec: Vec<f32>) {
-        let v = Vector::new(vec);
+        let data = Vector::new(vec);
         let level = self.random_level();
         let id = self.nodes.len();
         let neighbors = vec![vec![]; level + 1];
         let node = Node {
             id,
-            data: v,
+            data,
             neighbors,
         }
         self.nodes.push(Some(node));
@@ -161,6 +161,25 @@ impl Index {
         //neighbor which is the closest one
 
         // self.max_height = self.max_height.max(level as u32);
+    }
+
+    //greedy search at single layer.
+    fn search_layer(&self, id: usize, height: u32) -> usize {
+        let mut a: Option<usize> = self.start_point;
+        let mut best_node: Option<usize> = a;
+        if a == None {
+            return 0;
+        }
+        //We used .as_ref() to conver the &Option<T> into Option<&T>
+        //The &Option<T> is because of the &self at the beginning.
+        //We use .unwrap() to resolve Option<&T> into &T
+        //The & at the beginning is the explicit  borrow operator
+        //After .unwrap() gives us &Node(), which gives us &Vec<f32>
+        let x: &[f32] = &self.nodes[a.unwrap()].as_ref().unwrap().data.v;
+        let y: &[f32] = &self.nodes[id].as_ref().unwrap().data.v;
+        loop {
+            let current_node_similarity = 
+        }
     }
 }
 
