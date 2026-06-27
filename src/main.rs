@@ -175,10 +175,35 @@ impl Index {
         //We use .unwrap() to resolve Option<&T> into &T
         //The & at the beginning is the explicit  borrow operator
         //After .unwrap() gives us &Node(), which gives us &Vec<f32>
-        let x: &[f32] = &self.nodes[a.unwrap()].as_ref().unwrap().data.v;
-        let y: &[f32] = &self.nodes[id].as_ref().unwrap().data.v;
+
+        let a: &Node = self.nodes[a.unwrap()].as_ref().unwrap();
+        let input_node: &[f32] = &self.nodes[id].as_ref().unwrap().data.v;
+
+        let mut current_node: &[f32] = a.data.v;
+        let mut node_sim: f32 = self.metric.dist(x, y);
+
+        let mut temp_node: &[f32] = current_node;
+        let mut temp_node_sim: f32 = 0.0;
+
         loop {
-            let current_node_similarity = 
+            //Now i have to get the neighbors of the data vector x, so that we can compare it with
+            //the data vector y and compare it using  the similarity and get the minimum of that
+            let z: &[usize] = a.neighbors[height as usize];
+
+            let neighbors_node_data: Vec<&[f32]> = z.iter()
+                .map(|&neighbor_id| {
+                    self.nodes[neighbor_id].as_ref().unwrap().data.v
+                })
+                .collect();
+
+            //Now for each of the vectors i need to compare that with the y to see which is the similar one
+            //First i am thinking to write an simple loop and after that i am thinking to write it in iter function
+            for neighbor in neighbors_node_data {
+                let temp_node_sim: f32 = self.metric.dist(neighbor, y);
+                if temp_node_sim < current_node_sim {
+                    current_node_sim = temp_node_sim;
+                }
+            }
         }
     }
 }
