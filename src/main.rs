@@ -140,8 +140,8 @@ impl Index {
 
     pub fn insert_vec(&mut self, vec: Vec<f32>) {
         let data = Vector::new(vec);
-        let level = self.random_level();
-        let id = self.nodes.len();
+        let level: usize = self.random_level();
+        let id: usize = self.nodes.len();
         let neighbors = vec![vec![]; level + 1];
         let node = Node {
             id,
@@ -155,16 +155,27 @@ impl Index {
             return;
         }
 
+        self.max_height = self.max_height.max(level as u32);
         //To find the best neighborhood for your node at a layer.
         //At each layer, it looks at the current node's neighbors.
         //You kinda loook at all the neighbor node in the current node and only move with the
         //neighbor which is the closest one
 
-        // self.max_height = self.max_height.max(level as u32);
+        let mut start: usize = self.start_point.unwrap();
+        for i in (0..=self.max_height).rev() {
+            start = self.search_layer(id, i, start);
+            if i <= level as u32 {
+                //push is an method call, and method calls in Rust auto-deref automatically.
+                let a: &mut Vec<usize> = self.nodes[id].as_mut().unwrap().neighbors[i as usize];
+                if a.len() < self.m { a.push(start); }
+                let b: &mut Vec<usize> = self.nodes[start].as_mut().unwrap().neighbors[i as usize];
+                if b.len() < self.m { b.push(id); }
+            }
+        }
     }
 
     //greedy search at single layer.
-    fn search_layer(&self, id: usize, height: u32) -> usize {
+    pub fn search_layer(&self, id: usize, height: u32, start_node: usize) -> usize {
         //We used .as_ref() to conver the &Option<T> into Option<&T>
         //The &Option<T> is because of the &self at the beginning.
         //We use .unwrap() to resolve Option<&T> into &T
@@ -173,7 +184,7 @@ impl Index {
 
         let input_node_data: &[f32] = &self.nodes[id].as_ref().unwrap().data.v;
 
-        let mut current_node_index: usize = self.start_point.unwrap();
+        let mut current_node_index: usize = start_node;
         let mut current_node_sim: f32 = self.metric.dist(self.nodes[current_node_index].as_ref().unwrap().data.v, input_node_data);
 
         let mut temp_node_index: usize = current_node_index;
