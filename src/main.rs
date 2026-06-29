@@ -155,7 +155,6 @@ impl Index {
             return;
         }
 
-        self.max_height = self.max_height.max(level as u32);
         //To find the best neighborhood for your node at a layer.
         //At each layer, it looks at the current node's neighbors.
         //You kinda loook at all the neighbor node in the current node and only move with the
@@ -172,6 +171,7 @@ impl Index {
                 if b.len() < self.m { b.push(id); }
             }
         }
+        self.max_height = self.max_height.max(level as u32);
     }
 
     //greedy search at single layer.
@@ -194,8 +194,8 @@ impl Index {
             let neighbor_index: &[usize] = self.nodes[current_node_index].as_ref().unwrap().neighbors[height as usize];
 
             for neighbor in &neighbor_index {
-                let neighbor_data: &[f32] = self.nodes[neighbor].as_ref().unwrap().data.v; //The neighbor is of data type &usize but rust auto-derefs it when indexing so we don't need to deref it.
-                              
+                //The neighbor is of data type &usize but rust auto-derefs it when indexing so we don't need to deref it.
+                let neighbor_data: &[f32] = self.nodes[neighbor].as_ref().unwrap().data.v;
                 temp_node_sim = self.metric.dist(&neighbor_data, &input_node_data);
                 if temp_node_sim < current_node_sim {
                     current_node_sim = temp_node_sim;
