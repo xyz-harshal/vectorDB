@@ -1,4 +1,11 @@
-use rand::Rng;
+//Mutability isn't a property the variable carries around. It's a property of the reference.
+//Option and Result are an enums btw
+//A ref to a struct let's us access the fields, but it doesn't gives us the references to them.
+//Reaching a field just names us places - we don't own it.
+//&path if mentioned explicitly will give us reference to the data till the path ends.
+//the & given by the .as_ref() func will only give ref to it's target not it's childrens?
+use std::collections::HashSet;
+use rand;
 
 #[derive(Clone, Debug)]
 pub struct Vector {
@@ -23,17 +30,15 @@ impl Vector {
 
     fn normalize(&mut self) {
         let mut norm: f32 = 0.0;
-        //here the val is an &f32 which is the reference so to dereference it we use &val
-        //other option is to keep it val and inside the loop write (*val) instead of just val to dereference it
-        for val in &self.v { norm += (*val) * (*val); }
+        //&self.v gives &f32 per element, and the &val pattern destructure it to a plain f32.
+        //Or we can just deref it by putting * before val inside the scope.
+        for &val in &self.v { norm += val * val; }
         let norm = norm.sqrt();
         if norm == 0.0 { return; }
-        //the &mut self.v vector when looped gives out element having &mut f32 type
-        //You write it as val and then use it to update it, now it auto deref when applied to
-        //operators which are syntactic sugar so it auto deref it self.
-        //otherwise you have to check whether you get an error or not if you got an error then use
-        //*val instead of val there
-        for val in &mut self.v { val /= norm; }
+        //&mut self.v gives out &mut f32 so we can't destructure because if we do it we will lose
+        //the mutability and it would detach a copy from the vector so we just deref it in the 
+        //scope to keep the mutability property and change the value.
+        for val in &mut self.v { *val /= norm; }
     }
 }
 
@@ -45,7 +50,7 @@ pub struct Euclidean;
 
 impl DistanceMetric for Euclidean {
     fn dist(&self, v1: &[f32], v2: &[f32]) -> f32 {
-        let mut s: f32 = 0;
+        let mut s: f32 = 0.0;
         for i in 0..v1.len().min(v2.len()) {
             let a = v1[i] - v2[i];
             s += a * a;
@@ -58,9 +63,9 @@ pub struct Cosine;
 
 impl DistanceMetric for Cosine {
     fn dist(&self, v1: &[f32], v2: &[f32]) -> f32 {
-        let mut s: f32 = 0;
-        let mut m1: f32 = 0;
-        let mut m2: f32 = 0;
+        let mut s: f32 = 0.0;
+        let mut m1: f32 = 0.0;
+        let mut m2: f32 = 0.0;
         for i in 0..v1.len().min(v2.len()) {
             s += v1[i] * v2[i];
             m1 += v1[i] * v1[i];
@@ -76,9 +81,9 @@ pub struct DotProduct;
 
 impl DistanceMetric for DotProduct {
     fn dist(&self, v1: &[f32], v2: &[f32]) -> f32 {
-        let mut s: f32 = 0;
+        let mut s: f32 = 0.0;
         for i in 0..v1.len().min(v2.len()) {
-            s += (v1[i] * v2[i]);
+            s += v1[i] * v2[i];
         }
         -s
     }
@@ -159,15 +164,25 @@ impl Index {
         //At each layer, it looks at the current node's neighbors.
         //You kinda loook at all the neighbor node in the current node and only move with the
         //neighbor which is the closest one
+        
+        //A set to actually keep track of visited nodes while traversing in the graph.
+        let mut vis: HashSet<usize> = HashSet::new();
 
         let mut start: usize = self.start_point.unwrap();
         for i in (0..=self.max_height).rev() {
-            start = self.search_layer(id, i, start);
+            start = self.search_layer(id, i, start, &mut vis);
             if i <= level as u32 {
                 //push is an method call, and method calls in Rust auto-deref automatically.
-                let a: &mut Vec<usize> = self.nodes[id].as_mut().unwrap().neighbors[i as usize];
+                let a: &mut Vec<usize> = &mut self.nodes[id]
+                    .as_mut()
+                    .unwrap()
+                    .neighbors[i as usize];
                 if a.len() < self.m { a.push(start); }
-                let b: &mut Vec<usize> = self.nodes[start].as_mut().unwrap().neighbors[i as usize];
+
+                let b: &mut Vec<usize> = &mut self.nodes[start]
+                    .as_mut()
+                    .unwrap()
+                    .neighbors[i as usize];
                 if b.len() < self.m { b.push(id); }
             }
         }
@@ -175,7 +190,7 @@ impl Index {
     }
 
     //greedy search at single layer.
-    pub fn search_layer(&self, id: usize, height: u32, start_node: usize) -> usize {
+    pub fn search_layer(&self, id: usize, height: u32, start_node: usize, visited: &mut HashSet<usize>) -> usize {
         //We used .as_ref() to conver the &Option<T> into Option<&T>
         //The &Option<T> is because of the &self at the beginning.
         //We use .unwrap() to resolve Option<&T> into &T
@@ -184,20 +199,26 @@ impl Index {
 
         let input_node_data: &[f32] = &self.nodes[id].as_ref().unwrap().data.v;
 
+        visited.insert(start_node);
         let mut current_node_index: usize = start_node;
-        let mut current_node_sim: f32 = self.metric.dist(self.nodes[current_node_index].as_ref().unwrap().data.v, input_node_data);
+        let mut current_node_sim: f32 = self.metric.dist(&self.nodes[current_node_index].as_ref().unwrap().data.v, input_node_data);
 
         let mut temp_node_index: usize = current_node_index;
-        let mut temp_node_sim: f32 = current_node_sim;
 
         loop {
-            let neighbor_index: &[usize] = self.nodes[current_node_index].as_ref().unwrap().neighbors[height as usize];
+            //The Vec<usize> is an growable vector whereas the [usize] is an slice which whose size is dynamically determined at runtime
+            //Now i am using the .get() function which gives out the Option<&T> so we don't need to
+            //put the & ref before the statement, we did this because when we did indexing on the
+            //neighbors 2d vec, rust gives out the owned value when indexing so now it won't.
+            let neighbor_index: &Vec<usize> = &self.nodes[current_node_index]
+                .as_ref()
+                .unwrap()
+                .neighbors[height as usize];
 
-            for neighbor in &neighbor_index {
-                //The neighbor is of data type &usize but rust auto-derefs it when indexing so we don't need to deref it.
-                let neighbor_data: &[f32] = self.nodes[neighbor].as_ref().unwrap().data.v;
-                temp_node_sim = self.metric.dist(&neighbor_data, &input_node_data);
-                if temp_node_sim < current_node_sim {
+            for neighbor in neighbor_index {
+                let neighbor_data: &[f32] = &self.nodes[*neighbor].as_ref().unwrap().data.v;
+                let temp_node_sim: f32 = self.metric.dist(neighbor_data, input_node_data);
+                if temp_node_sim < current_node_sim && !visited.contains(neighbor) {
                     current_node_sim = temp_node_sim;
                     temp_node_index = *neighbor; //the neighbor is &usize so we have to deref it
                 }
@@ -206,6 +227,7 @@ impl Index {
                 break;
             }
             current_node_index = temp_node_index;
+            visited.insert(current_node_index);
         }
         current_node_index
     }
