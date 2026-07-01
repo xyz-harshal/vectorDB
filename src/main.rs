@@ -4,8 +4,9 @@
 //Reaching a field just names us places - we don't own it.
 //&path if mentioned explicitly will give us reference to the data till the path ends.
 //the & given by the .as_ref() func will only give ref to it's target not it's childrens?
-use std::collections::HashSet;
-use rand;
+use std::collections::{HashSet, BinaryHeap};
+use std::cmp::Reverse;
+use rand::Rng;
 
 #[derive(Clone, Debug)]
 pub struct Vector {
@@ -137,7 +138,7 @@ impl Index {
     //This function will basically roll a weighted die and decide, like in which layer the vector will fall.
     pub fn random_level(&self) -> usize {
         let r: f64 = rand::random();
-        if r == 0.0 { return 0; }
+        if r == 0.0 || self.m == 1 || self.m == 0 { return 0; }
         let ml: f64 = 1.0 / (self.m as f64).ln();
         let lev: usize = (-r.ln() * ml).floor() as usize;
         lev
@@ -165,71 +166,89 @@ impl Index {
         //You kinda loook at all the neighbor node in the current node and only move with the
         //neighbor which is the closest one
         
-        //A set to actually keep track of visited nodes while traversing in the graph.
-        let mut vis: HashSet<usize> = HashSet::new();
 
         let mut start: usize = self.start_point.unwrap();
         for i in (0..=self.max_height).rev() {
-            start = self.search_layer(id, i, start, &mut vis);
+
+            let candidate: Vec<usize> = self.search_layer(id, i, start);
+            if candidate.is_empty() { continue; }
+            start = candidate[0];
+            //This will make sure to get the m best nodes which are closest to the input node.
+            candidate.truncate(self.m);
+            
             if i <= level as u32 {
                 //push is an method call, and method calls in Rust auto-deref automatically.
-                let a: &mut Vec<usize> = &mut self.nodes[id]
-                    .as_mut()
-                    .unwrap()
-                    .neighbors[i as usize];
-                if a.len() < self.m { a.push(start); }
+                for best_node in candidate {
+                    let a: &mut Vec<usize> = &mut self.nodes[id]
+                        .as_mut()
+                        .unwrap()
+                        .neighbors[i as usize];
+                    if a.len() < self.m { a.push(best_node); }
 
-                let b: &mut Vec<usize> = &mut self.nodes[start]
-                    .as_mut()
-                    .unwrap()
-                    .neighbors[i as usize];
-                if b.len() < self.m { b.push(id); }
+                    let b: &mut Vec<usize> = &mut self.nodes[best_node]
+                        .as_mut()
+                        .unwrap()
+                        .neighbors[i as usize];
+                    if b.len() < self.m { b.push(id); }
+                }
             }
         }
-        self.max_height = self.max_height.max(level as u32);
+        if self.max_height < level as u32 {
+            self.max_height = level as u32;
+            self.start_point = Some(id);
+        }
     }
 
     //greedy search at single layer.
-    pub fn search_layer(&self, id: usize, height: u32, start_node: usize, visited: &mut HashSet<usize>) -> usize {
+    pub fn search_layer(&self, id: usize, height: u32, current_node_index: usize) -> Vec<usize> {
         //We used .as_ref() to conver the &Option<T> into Option<&T>
         //The &Option<T> is because of the &self at the beginning.
         //We use .unwrap() to resolve Option<&T> into &T
         //The & at the beginning is the explicit  borrow operator
         //After .unwrap() gives us &Node(), which gives us &Vec<f32>
 
+
+        //A set to actually keep track of visited nodes while traversing in the graph.
+        let mut visited: HashSet<usize> = HashSet::new();
+
+        //The priority queue
+        let mut p_queue: BinaryHeap<Reverse<(f32, usize)>> = BinaryHeap::new();
+        let mut candidate: Vec<(f32, usize)> = Vec::new();
+
         let input_node_data: &[f32] = &self.nodes[id].as_ref().unwrap().data.v;
 
-        visited.insert(start_node);
-        let mut current_node_index: usize = start_node;
-        let mut current_node_sim: f32 = self.metric.dist(&self.nodes[current_node_index].as_ref().unwrap().data.v, input_node_data);
+        p_queue.push(Reverse((self.metric.dist(&self.nodes[current_node_index].as_ref().unwrap().data.v, input_node_data), current_node_index)));
 
-        let mut temp_node_index: usize = current_node_index;
-
-        loop {
+        while !p_queue.is_empty() {
             //The Vec<usize> is an growable vector whereas the [usize] is an slice which whose size is dynamically determined at runtime
             //Now i am using the .get() function which gives out the Option<&T> so we don't need to
             //put the & ref before the statement, we did this because when we did indexing on the
             //neighbors 2d vec, rust gives out the owned value when indexing so now it won't.
-            let neighbor_index: &Vec<usize> = &self.nodes[current_node_index]
-                .as_ref()
-                .unwrap()
-                .neighbors[height as usize];
 
-            for neighbor in neighbor_index {
-                let neighbor_data: &[f32] = &self.nodes[*neighbor].as_ref().unwrap().data.v;
-                let temp_node_sim: f32 = self.metric.dist(neighbor_data, input_node_data);
-                if temp_node_sim < current_node_sim && !visited.contains(neighbor) {
-                    current_node_sim = temp_node_sim;
-                    temp_node_index = *neighbor; //the neighbor is &usize so we have to deref it
+            if let Some(Reverse((dist, vid))) = p_queue.pop() {
+                if visited.contains(&vid) {
+                    continue;
+                }
+                visited.insert(vid);
+                candidate.push((dist, vid));
+                let neighbor_index: &Vec<usize> = &self.nodes[vid]
+                    .as_ref()
+                    .unwrap()
+                    .neighbors[height as usize];
+
+                for neighbor in neighbor_index {
+                    let neighbor_data: &[f32] = &self.nodes[*neighbor].as_ref().unwrap().data.v;
+                    let neighbor_node_dist: f32 = self.metric.dist(neighbor_data, input_node_data);
+                    if !visited.contains(neighbor) {
+                        p_queue.push(Reverse((neighbor_node_dist, *neighbor)));
+                    }
                 }
             }
-            if current_node_index == temp_node_index {
-                break;
-            }
-            current_node_index = temp_node_index;
-            visited.insert(current_node_index);
         }
-        current_node_index
+        candidate.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        candidate.truncate(self.ef_construction);
+        let result: Vec<usize> = candidate.into_iter().map(|a| a.1).collect();
+        result
     }
 }
 
