@@ -8,6 +8,23 @@ use std::collections::{HashSet, BinaryHeap};
 use std::cmp::Reverse;
 use rand::Rng;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct OrdF32(f32);
+
+impl Eq for OrdF32 {}
+
+impl PartialOrd for OrdF32 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for OrdF32 {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.total_cmp(&other.0)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Vector {
     v: Vec<f32>,
@@ -167,10 +184,11 @@ impl Index {
         //neighbor which is the closest one
         
 
+        let input_node_data: Vec<f32> = self.nodes[id].as_ref().unwrap().data.v.clone();
         let mut start: usize = self.start_point.unwrap();
         for i in (0..=self.max_height).rev() {
 
-            let candidate: Vec<usize> = self.search_layer(id, i, start);
+            let mut candidate: Vec<usize> = self.search_layer(&input_node_data, i, start, self.ef_construction);
             if candidate.is_empty() { continue; }
             start = candidate[0];
             //This will make sure to get the m best nodes which are closest to the input node.
@@ -185,11 +203,38 @@ impl Index {
                         .neighbors[i as usize];
                     if a.len() < self.m { a.push(best_node); }
 
-                    let b: &mut Vec<usize> = &mut self.nodes[best_node]
-                        .as_mut()
+                    //Right now the 'b' vector holds the first m elements in the vector, but what we
+                    //want is to have the best m elements in the vector!
+                    let b_ref: &Vec<usize> = &self.nodes[best_node]
+                        .as_ref()
                         .unwrap()
                         .neighbors[i as usize];
-                    if b.len() < self.m { b.push(id); }
+
+                    if b_ref.len() < self.m {
+                        let b_mut: &mut Vec<usize> = &mut self.nodes[best_node]
+                            .as_mut()
+                            .unwrap()
+                            .neighbors[i as usize];
+                        b_mut.push(id);
+                    }
+                    else {
+                        let mut c: usize = 0;
+                        let mut d: f32 = 0.0;
+                        for i in 0..b_ref.len() {
+                            let e: f32 = self.metric.dist(&self.nodes[b_ref[i]].as_ref().unwrap().data.v, &self.nodes[best_node].as_ref().unwrap().data.v);
+                            if d < e {
+                                c = i;
+                                d = e;
+                            }
+                        }
+                        let x: f32 = self.metric.dist(&self.nodes[best_node].as_ref().unwrap().data.v, &self.nodes[b_ref[c]].as_ref().unwrap().data.v);
+                        let y: f32 = self.metric.dist(&self.nodes[id].as_ref().unwrap().data.v, &self.nodes[best_node].as_ref().unwrap().data.v);
+                        let b_mut: &mut Vec<usize> = &mut self.nodes[best_node]
+                            .as_mut()
+                            .unwrap()
+                            .neighbors[i as usize];
+                        if x > y { b_mut[c] = id;}
+                    }
                 }
             }
         }
@@ -200,7 +245,7 @@ impl Index {
     }
 
     //greedy search at single layer.
-    pub fn search_layer(&self, id: usize, height: u32, current_node_index: usize) -> Vec<usize> {
+    pub fn search_layer(&self, input_node_data: &[f32], height: u32, current_node_index: usize, ef: usize) -> Vec<usize> {
         //We used .as_ref() to conver the &Option<T> into Option<&T>
         //The &Option<T> is because of the &self at the beginning.
         //We use .unwrap() to resolve Option<&T> into &T
@@ -212,12 +257,10 @@ impl Index {
         let mut visited: HashSet<usize> = HashSet::new();
 
         //The priority queue
-        let mut p_queue: BinaryHeap<Reverse<(f32, usize)>> = BinaryHeap::new();
+        let mut p_queue: BinaryHeap<Reverse<(OrdF32, usize)>> = BinaryHeap::new();
         let mut candidate: Vec<(f32, usize)> = Vec::new();
 
-        let input_node_data: &[f32] = &self.nodes[id].as_ref().unwrap().data.v;
-
-        p_queue.push(Reverse((self.metric.dist(&self.nodes[current_node_index].as_ref().unwrap().data.v, input_node_data), current_node_index)));
+        p_queue.push(Reverse((OrdF32(self.metric.dist(&self.nodes[current_node_index].as_ref().unwrap().data.v, input_node_data)), current_node_index)));
 
         while !p_queue.is_empty() {
             //The Vec<usize> is an growable vector whereas the [usize] is an slice which whose size is dynamically determined at runtime
@@ -230,7 +273,7 @@ impl Index {
                     continue;
                 }
                 visited.insert(vid);
-                candidate.push((dist, vid));
+                candidate.push((dist.0, vid));
                 let neighbor_index: &Vec<usize> = &self.nodes[vid]
                     .as_ref()
                     .unwrap()
@@ -240,15 +283,33 @@ impl Index {
                     let neighbor_data: &[f32] = &self.nodes[*neighbor].as_ref().unwrap().data.v;
                     let neighbor_node_dist: f32 = self.metric.dist(neighbor_data, input_node_data);
                     if !visited.contains(neighbor) {
-                        p_queue.push(Reverse((neighbor_node_dist, *neighbor)));
+                        p_queue.push(Reverse((OrdF32(neighbor_node_dist), *neighbor)));
                     }
                 }
             }
         }
+        //The binary heap requires T: Ord instead of f32 so that it can use the cmp function to
+        //compare and sort because f32 can be NaN sometimes.
         candidate.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-        candidate.truncate(self.ef_construction);
+        candidate.truncate(ef);
         let result: Vec<usize> = candidate.into_iter().map(|a| a.1).collect();
         result
+    }
+    pub fn search(&self, input_node_data: &[f32], ef_search: usize, k: usize) -> Vec<usize> {
+        if self.start_point.is_none() { return Vec::new(); }
+        let mut start: usize = self.start_point.unwrap();
+        let mut candidate: Vec<usize> = Vec::new();
+        for i in (0..=self.max_height).rev() {
+            if i == 0 {
+                candidate = self.search_layer(input_node_data, i, start, ef_search);
+            }else{
+                candidate = self.search_layer(input_node_data, i, start, 1);
+                if candidate.is_empty() { continue; }
+                start = candidate[0];
+            }
+        }
+        candidate.truncate(k);
+        candidate
     }
 }
 
