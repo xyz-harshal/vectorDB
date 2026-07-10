@@ -3,7 +3,7 @@
 //A ref to a struct let's us access the fields, but it doesn't gives us the references to them.
 //Reaching a field just names us places - we don't own it.
 //&path if mentioned explicitly will give us reference to the data till the path ends.
-//the & given by the .as_ref() func will only give ref to it's target not it's childrens?
+//the & given by the .as_ref() func will only give ref to it's target not it's childrens!
 use std::collections::{HashSet, BinaryHeap};
 use std::cmp::Reverse;
 use rand::Rng;
@@ -183,12 +183,10 @@ impl Index {
         //You kinda loook at all the neighbor node in the current node and only move with the
         //neighbor which is the closest one
         
-
-        let input_node_data: Vec<f32> = self.nodes[id].as_ref().unwrap().data.v.clone();
         let mut start: usize = self.start_point.unwrap();
         for i in (0..=self.max_height).rev() {
 
-            let mut candidate: Vec<usize> = self.search_layer(&input_node_data, i, start, self.ef_construction);
+            let mut candidate: Vec<usize> = self.search_layer(&self.nodes[id].as_ref().unwrap().data.v, i, start, self.ef_construction);
             if candidate.is_empty() { continue; }
             start = candidate[0];
             //This will make sure to get the m best nodes which are closest to the input node.
@@ -220,20 +218,19 @@ impl Index {
                     else {
                         let mut c: usize = 0;
                         let mut d: f32 = 0.0;
-                        for i in 0..b_ref.len() {
-                            let e: f32 = self.metric.dist(&self.nodes[b_ref[i]].as_ref().unwrap().data.v, &self.nodes[best_node].as_ref().unwrap().data.v);
+                        for j in 0..b_ref.len() {
+                            let e: f32 = self.metric.dist(&self.nodes[b_ref[j]].as_ref().unwrap().data.v, &self.nodes[best_node].as_ref().unwrap().data.v);
                             if d < e {
-                                c = i;
+                                c = j;
                                 d = e;
                             }
                         }
-                        let x: f32 = self.metric.dist(&self.nodes[best_node].as_ref().unwrap().data.v, &self.nodes[b_ref[c]].as_ref().unwrap().data.v);
                         let y: f32 = self.metric.dist(&self.nodes[id].as_ref().unwrap().data.v, &self.nodes[best_node].as_ref().unwrap().data.v);
                         let b_mut: &mut Vec<usize> = &mut self.nodes[best_node]
                             .as_mut()
                             .unwrap()
                             .neighbors[i as usize];
-                        if x > y { b_mut[c] = id;}
+                        if d > y { b_mut[c] = id;}
                     }
                 }
             }
@@ -260,6 +257,7 @@ impl Index {
         let mut p_queue: BinaryHeap<Reverse<(OrdF32, usize)>> = BinaryHeap::new();
         let mut candidate: Vec<(f32, usize)> = Vec::new();
 
+        //The information of the current node is inserted in the binary heap!
         p_queue.push(Reverse((OrdF32(self.metric.dist(&self.nodes[current_node_index].as_ref().unwrap().data.v, input_node_data)), current_node_index)));
 
         while !p_queue.is_empty() {
@@ -268,13 +266,13 @@ impl Index {
             //put the & ref before the statement, we did this because when we did indexing on the
             //neighbors 2d vec, rust gives out the owned value when indexing so now it won't.
 
-            if let Some(Reverse((dist, vid))) = p_queue.pop() {
-                if visited.contains(&vid) {
+            if let Some(Reverse((dist, id))) = p_queue.pop() {
+                if visited.contains(&id) {
                     continue;
                 }
-                visited.insert(vid);
-                candidate.push((dist.0, vid));
-                let neighbor_index: &Vec<usize> = &self.nodes[vid]
+                visited.insert(id);
+                candidate.push((dist.0, id));
+                let neighbor_index: &Vec<usize> = &self.nodes[id]
                     .as_ref()
                     .unwrap()
                     .neighbors[height as usize];
