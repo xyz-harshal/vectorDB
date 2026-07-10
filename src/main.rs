@@ -217,7 +217,7 @@ impl Index {
                     }
                     else {
                         let mut c: usize = 0;
-                        let mut d: f32 = 0.0;
+                        let mut d: f32 = f32::NEG_INFINITY;
                         for j in 0..b_ref.len() {
                             let e: f32 = self.metric.dist(&self.nodes[b_ref[j]].as_ref().unwrap().data.v, &self.nodes[best_node].as_ref().unwrap().data.v);
                             if d < e {
@@ -248,49 +248,52 @@ impl Index {
         //We use .unwrap() to resolve Option<&T> into &T
         //The & at the beginning is the explicit  borrow operator
         //After .unwrap() gives us &Node(), which gives us &Vec<f32>
-
-
         //A set to actually keep track of visited nodes while traversing in the graph.
-        let mut visited: HashSet<usize> = HashSet::new();
-
-        //The priority queue
-        let mut p_queue: BinaryHeap<Reverse<(OrdF32, usize)>> = BinaryHeap::new();
-        let mut candidate: Vec<(f32, usize)> = Vec::new();
-
         //The information of the current node is inserted in the binary heap!
-        p_queue.push(Reverse((OrdF32(self.metric.dist(&self.nodes[current_node_index].as_ref().unwrap().data.v, input_node_data)), current_node_index)));
+        //The Vec<usize> is an growable vector whereas the [usize] is an slice which whose size is dynamically determined at runtime
+        //Now i am using the .get() function which gives out the Option<&T> so we don't need to
+        //put the & ref before the statement, we did this because when we did indexing on the
+        //neighbors 2d vec, rust gives out the owned value when indexing so now it won't.
+        //The binary heap requires T: Ord instead of f32 so that it can use the cmp function to
+        //compare and sort because f32 can be NaN sometimes.
+        
+        let mut frontier: BinaryHeap<Reverse<(OrdF32, usize)>> = BinaryHeap::new();
+        let mut board: BinaryHeap<(OrdF32, usize)> = BinaryHeap::new();
+        let mut visited: HashSet<usize> = HashSet::new();
+        
+        //Now i am going to insert the current node in both of the heaps:
+        let c0: OrdF32 = OrdF32(self.metric.dist(&self.nodes[current_node_index].as_ref().unwrap().data.v, input_node_data));
+        frontier.push(Reverse((c0, current_node_index)));
+        board.push((c0, current_node_index));
+        visited.insert(current_node_index);
 
-        while !p_queue.is_empty() {
-            //The Vec<usize> is an growable vector whereas the [usize] is an slice which whose size is dynamically determined at runtime
-            //Now i am using the .get() function which gives out the Option<&T> so we don't need to
-            //put the & ref before the statement, we did this because when we did indexing on the
-            //neighbors 2d vec, rust gives out the owned value when indexing so now it won't.
+        loop {
+            if frontier.is_empty() { break; }
+            if let Some(Reverse((dist, id))) = frontier.pop() {
+                if board.len() >= ef && board.peek().unwrap().0 < dist { break; }
+                //Time to get all the neighbors of this particular id;
+                let neighbors: &Vec<usize> = &self.nodes[id].as_ref().unwrap().neighbors[height as usize];
 
-            if let Some(Reverse((dist, id))) = p_queue.pop() {
-                if visited.contains(&id) {
-                    continue;
-                }
-                visited.insert(id);
-                candidate.push((dist.0, id));
-                let neighbor_index: &Vec<usize> = &self.nodes[id]
-                    .as_ref()
-                    .unwrap()
-                    .neighbors[height as usize];
-
-                for neighbor in neighbor_index {
-                    let neighbor_data: &[f32] = &self.nodes[*neighbor].as_ref().unwrap().data.v;
-                    let neighbor_node_dist: f32 = self.metric.dist(neighbor_data, input_node_data);
-                    if !visited.contains(neighbor) {
-                        p_queue.push(Reverse((OrdF32(neighbor_node_dist), *neighbor)));
+                for neighbor in neighbors {
+                    if !visited.insert(*neighbor) { continue; }
+                    let neighbor_curr_dist: OrdF32 = OrdF32(self.metric.dist(&self.nodes[*neighbor].as_ref().unwrap().data.v, input_node_data));
+                    if board.len() >= ef && board.peek().unwrap().0 < neighbor_curr_dist { continue; }
+                    frontier.push(Reverse((neighbor_curr_dist, *neighbor)));
+                    board.push((neighbor_curr_dist, *neighbor));
+                    if board.len() > ef {
+                        board.pop();
                     }
                 }
             }
         }
-        //The binary heap requires T: Ord instead of f32 so that it can use the cmp function to
-        //compare and sort because f32 can be NaN sometimes.
-        candidate.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-        candidate.truncate(ef);
-        let result: Vec<usize> = candidate.into_iter().map(|a| a.1).collect();
+        let mut result: Vec<usize> = Vec::new();
+        loop {
+            if board.is_empty() { break; }
+            if let Some((_, id)) = board.pop() {
+                result.push(id);
+            }
+        }
+        result.reverse();
         result
     }
     pub fn search(&self, input_node_data: &[f32], ef_search: usize, k: usize) -> Vec<usize> {
