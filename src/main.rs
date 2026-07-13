@@ -161,6 +161,27 @@ impl Index {
         lev
     }
 
+    pub fn select_neighbors(&self, base_vec: usize, neighbor: &Vec<usize>, m: usize) -> Vec<usize> {
+        let mut survivors: Vec<usize> = Vec::new();
+        for node in neighbor {
+            if survivors.len() >= m { break; }
+            let base_vec_data: &Vec<f32> = &self.nodes[base_vec].as_ref().unwrap().data.v;
+            let node_data: &Vec<f32> = &self.nodes[*node].as_ref().unwrap().data.v;
+            let dist1: f32 = self.metric.dist(node_data, base_vec_data);
+            let mut b: bool = true;
+
+            for survivor in &survivors {
+                let dist2: f32 = self.metric.dist(node_data, &self.nodes[*survivor].as_ref().unwrap().data.v);
+                if dist2 < dist1 { 
+                    b = false;
+                    break;
+                }
+            }
+            if b { survivors.push(*node); }
+        }
+       survivors 
+    }
+
     pub fn insert_vec(&mut self, vec: Vec<f32>) {
         let data = Vector::new(vec);
         let level: usize = self.random_level();
@@ -190,65 +211,11 @@ impl Index {
             if candidate.is_empty() { continue; }
             start = candidate[0];
             //This will make sure to get the m best nodes which are closest to the input node.
-            candidate.truncate(self.m);
+            //candidate.truncate(self.m);
+
 
             if i <= level as u32 {
-                for node in candidate {
-                    //id and node are both the indexes in consideration!
-                    let d: f32 = self.metric.dist(&self.nodes[id].as_ref().unwrap().data.v, &self.nodes[node].as_ref().unwrap().data.v);
-                    //The code to get the vector neighbor of both of the nodes
-                    let id_neighbor: &Vec<usize> = &self.nodes[id].as_ref().unwrap().neighbors[i];
-                    let node_neighbor: &Vec<usize> = &self.nodes[node].as_ref().unwrap().neighbors[i];
-                    //To get the worst element of the neighborhood;
-                    let mut id_addr: usize = 0;
-                    let mut id_dist: f32 = f32::NEG_INFINITY;
-                    for j in 0..id_neighbor.len() {
-                        let new_dist: f32 = self.metric.dist(&self.nodes[id].as_ref().unwrap().data.v, &self.nodes[id_neighbor[j]].as_ref().unwrap().data.v);
-                        if new_dist > id_dist {
-                            id_addr = j;
-                            id_dist = new_dist;
-                        }
-                    }
-                    let mut node_addr: usize = 0;
-                    let mut node_dist: f32 = f32::NEG_INFINITY;
-                    for j in 0..node_neighbor.len() {
-                        let new_dist: f32 = self.metric.dist(&self.nodes[node].as_ref().unwrap().data.v, &self.nodes[node_neighbor[j]].as_ref().unwrap().data.v);
-                        if new_dist > node_dist {
-                            node_addr = j;
-                            node_dist = new_dist;
-                        }
-                    }
-
-                    let id_full: bool = id_neighbor.len() >= self.m;
-                    let node_full: bool = node_neighbor.len() >= self.m;
-
-                    let should_connect = match (id_full, node_full) {
-                        (false, false) => true,
-                        (false, true) => node_dist > d,
-                        (true, false) => id_dist > d,
-                        (true, true) => id_dist > d && node_dist > d,
-                    };
-
-                    if should_connect {
-                        {
-                            let id_list: &mut Vec<usize> = &mut self.nodes[id].as_mut().unwrap().neighbors[i];
-                            if id_full {
-                                id_list[id_addr] = node;
-                            }else {
-                                id_list.push(node);
-                            }
-                        }
-                        {
-                            let node_list: &mut Vec<usize> = &mut self.nodes[node].as_mut().unwrap().neighbors[i];
-                            if node_full {
-                                node_list[node_addr] = id;
-                            }else {
-                                node_list.push(id);
-                            }
-                        }
-                    }
-
-                }
+                candidate = self.select_neighbors(id, &candidate, self.m);
             }
         }
         if self.max_height < level as u32 {
