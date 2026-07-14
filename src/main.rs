@@ -4,8 +4,43 @@
 //Reaching a field just names us places - we don't own it.
 //&path if mentioned explicitly will give us reference to the data till the path ends.
 //the & given by the .as_ref() func will only give ref to it's target not it's childrens!
-//
 //Each core in the CPU has it's own SIMD units.
+//-floating-point formats: sign bit + exponent bits + fraction bits
+//-Rayon crate in rust handles the multi threading so that we can access multiple cores at the same time
+
+//=== NOW: SIMD dist (the 2.5-3x) ===
+//TODO: Rewrite Euclidean dist: 8 accumulator lanes + chunks_exact(8) + zip the two chunk streams
+//TODO: Handle remainder() elements with a plain scalar loop
+//TODO: Return squared L2 (drop sqrt) -- ordering unchanged, HNSW only compares
+//TODO: Grep the codebase for any place that treats dist as an absolute value (should be none)
+//TODO: Build with -C target-cpu=native to unlock 256-bit ymm registers
+//TODO: Verify: bench dist alone (~30ns -> ~7ns at dim=32), then full index (expect 2.5-3x)
+//TODO: Same treatment for DotProduct; for Cosine: normalize once at insert, then dist = dot
+
+//=== NEXT: build-time speedups ===
+//TODO: In insert_vec, use ef=1 greedy descent for layers ABOVE the node's level (30-50% faster builds)
+//TODO: Kill the .clone()s in the insert hot path where a smarter borrow structure allows
+
+//=== THEN: memory layout (the last 1.5-2x, big refactor) ===
+//TODO: Flat storage: one Vec<f32> for ALL vectors, node i's data at [i*dim .. (i+1)*dim]
+//TODO: Neighbor lists as u32 instead of usize (half the edge memory, 2x per cache line)
+//TODO: Pooled visited-set: reusable epoch-stamped Vec<u32> instead of fresh HashSet per search
+
+//=== ALGORITHM GARNISHES (small recall/robustness wins) ===
+//TODO: keepPrunedConnections -- backfill empty slots with best rejected candidates
+//TODO: Make alpha-pruning a parameter (alpha=1.0 is current; try 1.2 like DiskANN, benchmark recall)
+
+//=== RESEARCH TOYS (the fun ones) ===
+//TODO: Quantization f32 -> int8: per-vector scale factor, calibrate range, THEN the recall ladder experiment
+//TODO: Re-rank pipeline: search quantized, recompute exact dists for top-100, return true top-10
+//TODO: Rayon: parallelize search across queries (embarrassingly parallel, good first threading exercise)
+//TODO: Measure own recall-vs-QPS curve, compare shape against ann-benchmarks.com hnswlib curve
+
+//=== HYGIENE (someday) ===
+//TODO: Make max_height a usize, delete every 'as u32'/'as usize' cast in insert/search
+//TODO: Delete unused Rng import; use Vector::normalize or delete it
+//TODO: Write invariant checks: zero orphans at layer 0, all edges point to valid ids
+
 use std::collections::{HashSet, BinaryHeap};
 use std::cmp::Reverse;
 use rand::Rng;
