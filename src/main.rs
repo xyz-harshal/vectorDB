@@ -294,8 +294,8 @@ impl Index {
 
         let mut start: usize = self.start_point.unwrap();
         for i in (0..=self.max_height).rev() {
-
-            let mut candidate: Vec<usize> = self.search_layer(&self.nodes[id].as_ref().unwrap().data.v, i, start, self.ef_construction);
+            let mut candidate: Vec<usize> = if i <= level as u32 { self.search_layer(&self.nodes[id].as_ref().unwrap().data.v, i, start, self.ef_construction)
+            }else { self.search_layer(&self.nodes[id].as_ref().unwrap().data.v, i, start, 1) };
             if candidate.is_empty() { continue; }
             start = candidate[0];
 
