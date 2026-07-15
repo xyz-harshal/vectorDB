@@ -7,39 +7,40 @@
 //Each core in the CPU has it's own SIMD units.
 //-floating-point formats: sign bit + exponent bits + fraction bits
 //-Rayon crate in rust handles the multi threading so that we can access multiple cores at the same time
+//.zip() is a method that is only applied on iterator not on an data type
+//In a loop if each step requires answer from the previous step then it can't be parallelized
+//For a loop to be parallelized ie vectorized with SIMD then the loop should only use values in present state
+//The chunks_exact(n) function gives an iterator which points to the og data in the heap but it gives the iterator in such a way so that chunks are created!
 
-//=== NOW: SIMD dist (the 2.5-3x) ===
-//TODO: Rewrite Euclidean dist: 8 accumulator lanes + chunks_exact(8) + zip the two chunk streams
-//TODO: Handle remainder() elements with a plain scalar loop
-//TODO: Return squared L2 (drop sqrt) -- ordering unchanged, HNSW only compares
-//TODO: Grep the codebase for any place that treats dist as an absolute value (should be none)
-//TODO: Build with -C target-cpu=native to unlock 256-bit ymm registers
-//TODO: Verify: bench dist alone (~30ns -> ~7ns at dim=32), then full index (expect 2.5-3x)
-//TODO: Same treatment for DotProduct; for Cosine: normalize once at insert, then dist = dot
+//=== DONE: SIMD dist ✓ (all metrics + normalize vectorized; gap 3.5x -> ~2.5x) ===
 
-//=== NEXT: build-time speedups ===
-//TODO: In insert_vec, use ef=1 greedy descent for layers ABOVE the node's level (30-50% faster builds)
-//TODO: Kill the .clone()s in the insert hot path where a smarter borrow structure allows
+//=== NOW: quick wins before the big one ===
+//TODO: insert_vec: ef=1 greedy descent for layers ABOVE node's level (30-50% faster builds, ~5 lines)
+//TODO: Cosine redesign: normalize once at insert (fn is ready & vectorized), dist becomes pure dot
+//TODO: Lock baseline: run harness on pre-refactor code, save numbers as pass/fail criterion
 
-//=== THEN: memory layout (the last 1.5-2x, big refactor) ===
+//=== THEN: memory layout (the remaining ~2-2.5x, big refactor) ===
 //TODO: Flat storage: one Vec<f32> for ALL vectors, node i's data at [i*dim .. (i+1)*dim]
-//TODO: Neighbor lists as u32 instead of usize (half the edge memory, 2x per cache line)
+//TODO: Neighbor lists as u32 instead of usize (half edge memory, 2x per cache line)
 //TODO: Pooled visited-set: reusable epoch-stamped Vec<u32> instead of fresh HashSet per search
+//TODO: Kill the .clone()s in insert while restructuring (folded into this refactor, not before)
+//TODO: Verify vs baseline: recall identical, queries faster — else bisect
 
-//=== ALGORITHM GARNISHES (small recall/robustness wins) ===
+//=== ALGORITHM GARNISHES (unchanged) ===
 //TODO: keepPrunedConnections -- backfill empty slots with best rejected candidates
-//TODO: Make alpha-pruning a parameter (alpha=1.0 is current; try 1.2 like DiskANN, benchmark recall)
+//TODO: alpha-pruning parameter (alpha=1.0 current; try 1.2 like DiskANN, benchmark recall)
 
-//=== RESEARCH TOYS (the fun ones) ===
-//TODO: Quantization f32 -> int8: per-vector scale factor, calibrate range, THEN the recall ladder experiment
-//TODO: Re-rank pipeline: search quantized, recompute exact dists for top-100, return true top-10
-//TODO: Rayon: parallelize search across queries (embarrassingly parallel, good first threading exercise)
-//TODO: Measure own recall-vs-QPS curve, compare shape against ann-benchmarks.com hnswlib curve
+//=== RESEARCH TOYS (one addition) ===
+//TODO: Benchmark on a REAL dataset (SIFT1M standard) -- random high-dim data understates recall
+//TODO: Quantization f32 -> int8: per-vector scale, calibrate range, then the recall ladder
+//TODO: Re-rank pipeline: search quantized, exact re-rank top-100
+//TODO: Rayon: parallelize search across queries
+//TODO: Own recall-vs-QPS curve vs ann-benchmarks.com
 
-//=== HYGIENE (someday) ===
-//TODO: Make max_height a usize, delete every 'as u32'/'as usize' cast in insert/search
-//TODO: Delete unused Rng import; use Vector::normalize or delete it
-//TODO: Write invariant checks: zero orphans at layer 0, all edges point to valid ids
+//=== HYGIENE (one item resolved by Cosine redesign) ===
+//TODO: max_height -> usize, delete every cast
+//TODO: Delete unused Rng import
+//TODO: Invariant checks: zero orphans at layer 0, all edges valid
 
 use std::collections::{HashSet, BinaryHeap};
 use std::cmp::Reverse;
@@ -84,10 +85,18 @@ impl Vector {
     }
 
     fn normalize(&mut self) {
-        let mut norm: f32 = 0.0;
+        let mut s: [f32; 8] = [0.0f32; 8];
         //&self.v gives &f32 per element, and the &val pattern destructure it to a plain f32.
         //Or we can just deref it by putting * before val inside the scope.
-        for &val in &self.v { norm += val * val; }
+        let chunks = self.v.chunks_exact(8);
+        let rem_chunks: &[f32] = chunks.remainder();
+        for a in chunks {
+            for j in 0..8 {
+                s[j] += a[j] * a[j];
+            }
+        }
+        let mut norm: f32 = s.iter().sum(); 
+        for &a in rem_chunks { norm += a * a;}
         let norm = norm.sqrt();
         if norm == 0.0 { return; }
         //&mut self.v gives out &mut f32 so we can't destructure because if we do it we will lose
@@ -105,12 +114,27 @@ pub struct Euclidean;
 
 impl DistanceMetric for Euclidean {
     fn dist(&self, v1: &[f32], v2: &[f32]) -> f32 {
-        let mut s: f32 = 0.0;
-        for i in 0..v1.len().min(v2.len()) {
-            let a = v1[i] - v2[i];
-            s += a * a;
+        let mut s: [f32; 8] = [0.0f32; 8];
+        // chunks variable is an iterator where each element is &[f32]
+        // each element size if of 8 elements
+        let chunks_v1 = v1.chunks_exact(8);
+        let chunks_v2 = v2.chunks_exact(8);
+        let remaining_v1: &[f32] = chunks_v1.remainder();
+        let remaining_v2: &[f32] = chunks_v2.remainder();
+        //here every chunk of both the vectors are paired not every element but every chunk of size 8
+        //the magic of SIMD is that the inner loop will execute at once
+        for (a, b) in chunks_v1.zip(chunks_v2) {
+            for j in 0..8 {
+                let x: f32 = a[j] - b[j];
+                s[j] += x * x;
+            }
         }
-        s.sqrt()
+        let mut total: f32 = s.iter().sum();
+        for (a, b) in remaining_v1.iter().zip(remaining_v2) {
+            let x: f32 = *a - *b;
+            total += x * x;
+        }
+        total
     }
 }
 
@@ -118,17 +142,32 @@ pub struct Cosine;
 
 impl DistanceMetric for Cosine {
     fn dist(&self, v1: &[f32], v2: &[f32]) -> f32 {
-        let mut s: f32 = 0.0;
-        let mut m1: f32 = 0.0;
-        let mut m2: f32 = 0.0;
-        for i in 0..v1.len().min(v2.len()) {
-            s += v1[i] * v2[i];
-            m1 += v1[i] * v1[i];
-            m2 += v2[i] * v2[i];
+        let mut num_sum: [f32; 8] = [0.0f32; 8];
+        let mut x_sum: [f32; 8] = [0.0f32; 8];
+        let mut y_sum: [f32; 8] = [0.0f32; 8];
+        let chunks_v1 = v1.chunks_exact(8);
+        let chunks_v2 = v2.chunks_exact(8);
+        let rem_v1: &[f32] = chunks_v1.remainder();
+        let rem_v2: &[f32] = chunks_v2.remainder();
+        
+        for (a, b) in chunks_v1.zip(chunks_v2) {
+            for j in 0..8 {
+                num_sum[j] += a[j] * b[j];
+                x_sum[j] += a[j] * a[j];
+                y_sum[j] += b[j] * b[j];
+            }
         }
-        let den: f32 = (m1 * m2).sqrt();
-        if den == 0.0 { return 0.0; }
-        1.0 - (s / den)
+        let mut num: f32 = num_sum.iter().sum();
+        let mut d1: f32 = x_sum.iter().sum();
+        let mut d2: f32 = y_sum.iter().sum();
+        for (&a, &b) in rem_v1.iter().zip(rem_v2) {
+            num += a * b;
+            d1 += a * a;
+            d2 += b * b;
+        }
+        let den: f32 = (d1 * d2).sqrt();
+        if den == 0.0 { return 0.0f32; }
+        1.0f32 - num / den
     }
 }
 
@@ -136,11 +175,23 @@ pub struct DotProduct;
 
 impl DistanceMetric for DotProduct {
     fn dist(&self, v1: &[f32], v2: &[f32]) -> f32 {
-        let mut s: f32 = 0.0;
-        for i in 0..v1.len().min(v2.len()) {
-            s += v1[i] * v2[i];
+        let mut s: [f32; 8] = [0.0f32; 8];
+        let chunks_v1 = v1.chunks_exact(8);
+        let chunks_v2 = v2.chunks_exact(8);
+        let rem_v1: &[f32] = chunks_v1.remainder();
+        let rem_v2: &[f32] = chunks_v2.remainder();
+
+        for (a, b) in chunks_v1.zip(chunks_v2) {
+            //vectorized loop
+            for j in 0..8 {
+                s[j] += a[j] * b[j];
+            }
         }
-        -s
+        let mut res: f32 = s.iter().sum();
+        for (a, b) in rem_v1.iter().zip(rem_v2) {
+            res += *a * *b;
+        }
+        -res
     }
 }
 
