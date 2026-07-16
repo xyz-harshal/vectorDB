@@ -14,8 +14,14 @@
 
 //=== DONE: SIMD dist ✓ (all metrics + normalize vectorized; gap 3.5x -> ~2.5x) ===
 
-//=== NOW: quick wins before the big one ===
-//TODO: Lock baseline: run harness on pre-refactor code, save numbers as pass/fail criterion
+//=== BASELINE (pre-refactor, locked) — pass/fail criterion for memory-layout work ===
+// Config: dim=32, m=16, ef_c=100, ef_search=64, k=10, Euclidean, single-threaded
+// N=20k:  build ~6.0s | query ~200us | recall 0.94-0.95 | orphans 0 | avg deg L0 ~22.7
+// Sweep @20k: ef16=0.64 | ef32=0.83 | ef64=0.95 | ef128=0.99 | ef256=1.00
+// vs hnswlib (same-session ratios): build ~2.4x slower | query ~2.5-3x slower | recall PARITY
+// Cosine (normalize-once): ~133us @ ef64, recall ~0.945
+// PASS after refactor = recall/sweep identical (±noise), query faster, zero orphans
+// FAIL = any recall drop -> bisect the refactor
 
 //=== THEN: memory layout (the remaining ~2-2.5x, big refactor) ===
 //TODO: Flat storage: one Vec<f32> for ALL vectors, node i's data at [i*dim .. (i+1)*dim]
