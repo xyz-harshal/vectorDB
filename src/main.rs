@@ -15,8 +15,6 @@
 //=== DONE: SIMD dist ✓ (all metrics + normalize vectorized; gap 3.5x -> ~2.5x) ===
 
 //=== NOW: quick wins before the big one ===
-//TODO: insert_vec: ef=1 greedy descent for layers ABOVE node's level (30-50% faster builds, ~5 lines)
-//TODO: Cosine redesign: normalize once at insert (fn is ready & vectorized), dist becomes pure dot
 //TODO: Lock baseline: run harness on pre-refactor code, save numbers as pass/fail criterion
 
 //=== THEN: memory layout (the remaining ~2-2.5x, big refactor) ===
@@ -108,6 +106,7 @@ impl Vector {
 
 pub trait DistanceMetric {
     fn dist(&self, v1: &[f32], v2: &[f32]) -> f32;
+    fn needs_normalize(&self) -> bool;
 }
 
 pub struct Euclidean;
@@ -136,39 +135,19 @@ impl DistanceMetric for Euclidean {
         }
         total
     }
+    fn needs_normalize(&self) -> bool { false }
 }
 
 pub struct Cosine;
 
 impl DistanceMetric for Cosine {
+    //A zero query vector under Cosine now returns distance 1.0 to everything (old code returned 0.0
     fn dist(&self, v1: &[f32], v2: &[f32]) -> f32 {
-        let mut num_sum: [f32; 8] = [0.0f32; 8];
-        let mut x_sum: [f32; 8] = [0.0f32; 8];
-        let mut y_sum: [f32; 8] = [0.0f32; 8];
-        let chunks_v1 = v1.chunks_exact(8);
-        let chunks_v2 = v2.chunks_exact(8);
-        let rem_v1: &[f32] = chunks_v1.remainder();
-        let rem_v2: &[f32] = chunks_v2.remainder();
-        
-        for (a, b) in chunks_v1.zip(chunks_v2) {
-            for j in 0..8 {
-                num_sum[j] += a[j] * b[j];
-                x_sum[j] += a[j] * a[j];
-                y_sum[j] += b[j] * b[j];
-            }
-        }
-        let mut num: f32 = num_sum.iter().sum();
-        let mut d1: f32 = x_sum.iter().sum();
-        let mut d2: f32 = y_sum.iter().sum();
-        for (&a, &b) in rem_v1.iter().zip(rem_v2) {
-            num += a * b;
-            d1 += a * a;
-            d2 += b * b;
-        }
-        let den: f32 = (d1 * d2).sqrt();
-        if den == 0.0 { return 0.0f32; }
-        1.0f32 - num / den
+        let num: f32 = DotProduct.dist(v1, v2);
+        //We are doing `+` because the DotProduct.dist function gives out the -dist as value
+        1.0f32 + num 
     }
+    fn needs_normalize(&self) -> bool { true }
 }
 
 pub struct DotProduct;
@@ -193,6 +172,7 @@ impl DistanceMetric for DotProduct {
         }
         -res
     }
+    fn needs_normalize(&self) -> bool { false }
 }
 
 #[derive(Clone, Debug)]
@@ -281,6 +261,10 @@ impl Index {
             neighbors,
         };
         self.nodes.push(Some(node));
+
+        if self.metric.needs_normalize() {
+            self.nodes[id].as_mut().unwrap().data.normalize();
+        }
         if self.start_point == None {
             self.start_point = Some(id);
             self.max_height = level as u32;
@@ -291,6 +275,7 @@ impl Index {
         //At each layer, it looks at the current node's neighbors.
         //You kinda loook at all the neighbor node in the current node and only move with the
         //neighbor which is the closest one
+
 
         let mut start: usize = self.start_point.unwrap();
         for i in (0..=self.max_height).rev() {
@@ -387,13 +372,22 @@ impl Index {
 
     pub fn search(&self, input_node_data: &[f32], ef_search: usize, k: usize) -> Vec<usize> {
         if self.start_point.is_none() { return Vec::new(); }
+        //The input_node_data.to_vec() is somewhat kinda not that expensive operation and it should
+        //be solved later, but for now it increases nanoseconds against the miliseconds
+        let input_vec: Vec<f32> = if self.metric.needs_normalize() {
+            let mut x: Vector = Vector {
+                v: input_node_data.to_vec(),
+            };
+            x.normalize();
+            x.v
+        }else{ input_node_data.to_vec() };
         let mut start: usize = self.start_point.unwrap();
         let mut candidate: Vec<usize> = Vec::new();
         for i in (0..=self.max_height).rev() {
             if i == 0 {
-                candidate = self.search_layer(input_node_data, i, start, ef_search);
+                candidate = self.search_layer(&input_vec, i, start, ef_search);
             }else{
-                candidate = self.search_layer(input_node_data, i, start, 1);
+                candidate = self.search_layer(&input_vec, i, start, 1);
                 if candidate.is_empty() { continue; }
                 start = candidate[0];
             }
