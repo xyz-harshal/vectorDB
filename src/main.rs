@@ -67,49 +67,6 @@ impl Ord for OrdF32 {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct Vector {
-    v: Vec<f32>,
-}
-
-impl Vector {
-    fn new(data: Vec<f32>) -> Self {
-        Self {
-            v: data,
-        }
-    }
-
-    fn len(&self) -> usize {
-        self.v.len()
-    }
-
-    //this is where the input is borrowed vector and it returns the borrowed string of vectors.
-    fn as_slice(&self) -> &[f32] {
-        &self.v
-    }
-
-    fn normalize(&mut self) {
-        let mut s: [f32; 8] = [0.0f32; 8];
-        //&self.v gives &f32 per element, and the &val pattern destructure it to a plain f32.
-        //Or we can just deref it by putting * before val inside the scope.
-        let chunks = self.v.chunks_exact(8);
-        let rem_chunks: &[f32] = chunks.remainder();
-        for a in chunks {
-            for j in 0..8 {
-                s[j] += a[j] * a[j];
-            }
-        }
-        let mut norm: f32 = s.iter().sum(); 
-        for &a in rem_chunks { norm += a * a;}
-        let norm = norm.sqrt();
-        if norm == 0.0 { return; }
-        //&mut self.v gives out &mut f32 so we can't destructure because if we do it we will lose
-        //the mutability and it would detach a copy from the vector so we just deref it in the 
-        //scope to keep the mutability property and change the value.
-        for val in &mut self.v { *val /= norm; }
-    }
-}
-
 pub trait DistanceMetric {
     fn dist(&self, v1: &[f32], v2: &[f32]) -> f32;
     fn needs_normalize(&self) -> bool;
@@ -151,7 +108,7 @@ impl DistanceMetric for Cosine {
     fn dist(&self, v1: &[f32], v2: &[f32]) -> f32 {
         let num: f32 = DotProduct.dist(v1, v2);
         //We are doing `+` because the DotProduct.dist function gives out the -dist as value
-        1.0f32 + num 
+        1.0f32 + num
     }
     fn needs_normalize(&self) -> bool { true }
 }
@@ -184,11 +141,13 @@ impl DistanceMetric for DotProduct {
 #[derive(Clone, Debug)]
 pub struct Node {
     id: usize,
-    data: Vector,
     neighbors: Vec<Vec<usize>>,
 }
 
 pub struct Index {
+    //This vectors array is basically the concatenation of all the vectors.
+    vectors: Vec<f32>,
+    dim: usize,
     //All the vectors present in the List
     nodes: Vec<Option<Node>>,
     //The start point of the HNSW graph
@@ -215,8 +174,10 @@ pub struct Index {
 //Box is an heap allocated pointer;
 
 impl Index {
-    pub fn new(m: usize, ef_construction: usize, metric: Box<dyn DistanceMetric>) -> Self {
+    pub fn new(m: usize, ef_construction: usize, metric: Box<dyn DistanceMetric>, dim: usize) -> Self {
         Self {
+            vectors: Vec::new(),
+            dim,
             nodes: Vec::new(),
             start_point: None,
             max_height: 0,
@@ -224,6 +185,26 @@ impl Index {
             ef_construction,
             metric,
         }
+    }
+    fn normalize(&mut self, i: usize) {
+        let mut s: [f32; 8] = [0.0f32; 8];
+        //&self.v gives &f32 per element, and the &val pattern destructure it to a plain f32.
+        //Or we can just deref it by putting * before val inside the scope.
+        let chunks = self.vectors[i * self.dim..(i + 1) * self.dim].chunks_exact(8);
+        let rem_chunks: &[f32] = chunks.remainder();
+        for a in chunks {
+            for j in 0..8 {
+                s[j] += a[j] * a[j];
+            }
+        }
+        let mut norm: f32 = s.iter().sum();
+        for &a in rem_chunks { norm += a * a;}
+        let norm = norm.sqrt();
+        if norm == 0.0 { return; }
+        //&mut self.v gives out &mut f32 so we can't destructure because if we do it we will lose
+        //the mutability and it would detach a copy from the vector so we just deref it in the 
+        //scope to keep the mutability property and change the value.
+        for val in &mut self.vectors[i * self.dim..(i + 1) * self.dim] { *val /= norm; }
     }
 
     //This function will basically roll a weighted die and decide, like in which layer the vector will fall.
@@ -237,39 +218,39 @@ impl Index {
 
     pub fn select_neighbors(&self, base_vec: usize, neighbor: &Vec<usize>, m: usize) -> Vec<usize> {
         let mut survivors: Vec<usize> = Vec::new();
-        for node in neighbor {
+        for &node in neighbor {
             if survivors.len() >= m { break; }
-            let base_vec_data: &Vec<f32> = &self.nodes[base_vec].as_ref().unwrap().data.v;
-            let node_data: &Vec<f32> = &self.nodes[*node].as_ref().unwrap().data.v;
+            let base_vec_data: &[f32] = &self.vectors[base_vec * self.dim..(base_vec + 1) * self.dim];
+            let node_data: &[f32] = &self.vectors[node * self.dim..(node + 1) * self.dim];
             let dist1: f32 = self.metric.dist(node_data, base_vec_data);
             let mut b: bool = true;
 
-            for survivor in &survivors {
-                let dist2: f32 = self.metric.dist(node_data, &self.nodes[*survivor].as_ref().unwrap().data.v);
-                if dist2 < dist1 { 
+            for &survivor in &survivors {
+                let dist2: f32 = self.metric.dist(node_data, &self.vectors[survivor * self.dim..(survivor + 1) * self.dim]);
+                if dist2 < dist1 {
                     b = false;
                     break;
                 }
             }
-            if b { survivors.push(*node); }
+            if b { survivors.push(node); }
         }
        survivors
     }
 
     pub fn insert_vec(&mut self, vec: Vec<f32>) {
-        let data = Vector::new(vec);
+        self.vectors.extend_from_slice(&vec);
         let level: usize = self.random_level();
         let id: usize = self.nodes.len();
         let neighbors = vec![vec![]; level + 1];
         let node = Node {
             id,
-            data,
             neighbors,
         };
+
         self.nodes.push(Some(node));
 
         if self.metric.needs_normalize() {
-            self.nodes[id].as_mut().unwrap().data.normalize();
+            self.normalize(id);
         }
         if self.start_point == None {
             self.start_point = Some(id);
@@ -281,12 +262,10 @@ impl Index {
         //At each layer, it looks at the current node's neighbors.
         //You kinda loook at all the neighbor node in the current node and only move with the
         //neighbor which is the closest one
-
-
         let mut start: usize = self.start_point.unwrap();
         for i in (0..=self.max_height).rev() {
-            let mut candidate: Vec<usize> = if i <= level as u32 { self.search_layer(&self.nodes[id].as_ref().unwrap().data.v, i, start, self.ef_construction)
-            }else { self.search_layer(&self.nodes[id].as_ref().unwrap().data.v, i, start, 1) };
+            let mut candidate: Vec<usize> = if i <= level as u32 { self.search_layer(&self.vectors[id * self.dim..(id + 1) * self.dim], i, start, self.ef_construction)
+            }else { self.search_layer(&self.vectors[id * self.dim..(id + 1) * self.dim], i, start, 1) };
             if candidate.is_empty() { continue; }
             start = candidate[0];
 
@@ -294,23 +273,23 @@ impl Index {
                 let cap: usize = if i == 0 { 2 * self.m } else { self.m };
                 candidate = self.select_neighbors(id, &candidate, self.m);
                 self.nodes[id].as_mut().unwrap().neighbors[i as usize] = candidate.clone();
-                for survivor in &candidate {
+                for &survivor in &candidate {
                     //here i am taking a mutable reference of the self.nodes object
-                    let mut survivor_neighbor: Vec<usize> = self.nodes[*survivor].as_mut().unwrap().neighbors[i as usize].clone();
+                    let mut survivor_neighbor: Vec<usize> = self.nodes[survivor].as_mut().unwrap().neighbors[i as usize].clone();
                     survivor_neighbor.push(id);
                     if survivor_neighbor.len() > cap {
                         let mut temp: Vec<(f32, usize)> = Vec::new();
-                        for surv in &survivor_neighbor {
-                            temp.push((self.metric.dist(&self.nodes[*surv].as_ref().unwrap().data.v, &self.nodes[*survivor].as_ref().unwrap().data.v), *surv));
+                        for &surv in &survivor_neighbor {
+                            temp.push((self.metric.dist(&self.vectors[surv * self.dim..(surv + 1) * self.dim], &self.vectors[survivor * self.dim..(survivor + 1) * self.dim]), surv));
                         }
                         temp.sort_by(|a, b| a.0.total_cmp(&b.0));
                         survivor_neighbor.clear();
                         for (_, addr) in &temp {
                             survivor_neighbor.push(*addr);
                         }
-                       survivor_neighbor = self.select_neighbors(*survivor, &survivor_neighbor, cap);
+                       survivor_neighbor = self.select_neighbors(survivor, &survivor_neighbor, cap);
                     }
-                    self.nodes[*survivor].as_mut().unwrap().neighbors[i as usize] = survivor_neighbor;
+                    self.nodes[survivor].as_mut().unwrap().neighbors[i as usize] = survivor_neighbor;
                 }
             }
         }
@@ -341,7 +320,7 @@ impl Index {
         let mut visited: HashSet<usize> = HashSet::new();
         
         //Now i am going to insert the current node in both of the heaps:
-        let c0: OrdF32 = OrdF32(self.metric.dist(&self.nodes[current_node_index].as_ref().unwrap().data.v, input_node_data));
+        let c0: OrdF32 = OrdF32(self.metric.dist(&self.vectors[current_node_index * self.dim..(current_node_index + 1) * self.dim], input_node_data));
         frontier.push(Reverse((c0, current_node_index)));
         board.push((c0, current_node_index));
         visited.insert(current_node_index);
@@ -353,12 +332,12 @@ impl Index {
                 //Time to get all the neighbors of this particular id;
                 let neighbors: &Vec<usize> = &self.nodes[id].as_ref().unwrap().neighbors[height as usize];
 
-                for neighbor in neighbors {
-                    if !visited.insert(*neighbor) { continue; }
-                    let neighbor_curr_dist: OrdF32 = OrdF32(self.metric.dist(&self.nodes[*neighbor].as_ref().unwrap().data.v, input_node_data));
+                for &neighbor in neighbors {
+                    if !visited.insert(neighbor) { continue; }
+                    let neighbor_curr_dist: OrdF32 = OrdF32(self.metric.dist(&self.vectors[neighbor * self.dim..(neighbor + 1) * self.dim], input_node_data));
                     if board.len() >= ef && board.peek().unwrap().0 < neighbor_curr_dist { continue; }
-                    frontier.push(Reverse((neighbor_curr_dist, *neighbor)));
-                    board.push((neighbor_curr_dist, *neighbor));
+                    frontier.push(Reverse((neighbor_curr_dist, neighbor)));
+                    board.push((neighbor_curr_dist, neighbor));
                     if board.len() > ef {
                         board.pop();
                     }
