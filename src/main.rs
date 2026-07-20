@@ -27,7 +27,6 @@
 // FAIL = any recall drop -> bisect the refactor
 
 //=== THEN: memory layout (the remaining ~2-2.5x, big refactor) ===
-//TODO: Pooled visited-set: reusable epoch-stamped Vec<u32> instead of fresh HashSet per search
 //TODO: Kill the .clone()s in insert while restructuring (folded into this refactor, not before)
 //TODO: Verify vs baseline: recall identical, queries faster — else bisect
 
@@ -270,12 +269,15 @@ impl Index {
         //At each layer, it looks at the current node's neighbors.
         //You kinda loook at all the neighbor node in the current node and only move with the
         //neighbor which is the closest one
+        let mut visited: Vec<u32> = vec![0u32; self.nodes.len()];
+        let mut count: u32 = 1;
         let mut start: u32 = self.start_point.unwrap();
         for i in (0..=self.max_height).rev() {
-            let mut candidate: Vec<u32> = if i <= level { self.search_layer(self.get_vec(id), i, start, self.ef_construction)
-            }else { self.search_layer(self.get_vec(id), i, start, 1) };
+            let mut candidate: Vec<u32> = if i <= level { self.search_layer(self.get_vec(id), i, start, self.ef_construction, &mut visited, count)
+            }else { self.search_layer(self.get_vec(id), i, start, 1, &mut visited, count) };
             if candidate.is_empty() { continue; }
             start = candidate[0];
+            count += 1;
 
             if i <= level {
                 let cap: usize = if i == 0 { 2 * self.m } else { self.m };
@@ -308,7 +310,7 @@ impl Index {
     }
 
     //greedy search at single layer.
-    pub fn search_layer(&self, input_node_data: &[f32], height: usize, current_node_index: u32, ef: usize) -> Vec<u32> {
+    pub fn search_layer(&self, input_node_data: &[f32], height: usize, current_node_index: u32, ef: usize, visited: &mut Vec<u32>, count: u32) -> Vec<u32> {
         //We used .as_ref() to conver the &Option<T> into Option<&T>
         //The &Option<T> is because of the &self at the beginning.
         //We use .unwrap() to resolve Option<&T> into &T
@@ -325,13 +327,12 @@ impl Index {
         
         let mut frontier: BinaryHeap<Reverse<(OrdF32, u32)>> = BinaryHeap::new();
         let mut board: BinaryHeap<(OrdF32, u32)> = BinaryHeap::new();
-        let mut visited: HashSet<u32> = HashSet::new();
         
         //Now i am going to insert the current node in both of the heaps:
         let c0: OrdF32 = OrdF32(self.metric.dist(self.get_vec(current_node_index as usize), input_node_data));
         frontier.push(Reverse((c0, current_node_index)));
         board.push((c0, current_node_index));
-        visited.insert(current_node_index);
+        visited[current_node_index as usize] = count;
 
         loop {
             if frontier.is_empty() { break; }
@@ -341,7 +342,8 @@ impl Index {
                 let neighbors: &Vec<u32> = &self.nodes[id as usize].as_ref().unwrap().neighbors[height];
 
                 for &neighbor in neighbors {
-                    if !visited.insert(neighbor) { continue; }
+                    if visited[neighbor as usize] == count { continue; }
+                    else { visited[neighbor as usize] = count; }
                     let neighbor_curr_dist: OrdF32 = OrdF32(self.metric.dist(self.get_vec(neighbor as usize), input_node_data));
                     if board.len() >= ef && board.peek().unwrap().0 < neighbor_curr_dist { continue; }
                     frontier.push(Reverse((neighbor_curr_dist, neighbor)));
@@ -373,14 +375,17 @@ impl Index {
         }
         let mut start: u32 = self.start_point.unwrap() as u32;
         let mut candidate: Vec<u32> = Vec::new();
+        let mut visited: Vec<u32> = vec![0u32; self.nodes.len()]; 
+        let mut count: u32 = 1;
         for i in (0..=self.max_height).rev() {
             if i == 0 {
-                candidate = self.search_layer(&query, i, start, ef_search);
+                candidate = self.search_layer(&query, i, start, ef_search, &mut visited, count);
             }else{
-                candidate = self.search_layer(&query, i, start, 1);
+                candidate = self.search_layer(&query, i, start, 1, &mut visited, count);
                 if candidate.is_empty() { continue; }
                 start = candidate[0];
             }
+            count += 1;
         }
         candidate.truncate(k);
         candidate
