@@ -27,8 +27,6 @@
 // FAIL = any recall drop -> bisect the refactor
 
 //=== THEN: memory layout (the remaining ~2-2.5x, big refactor) ===
-//TODO: Flat storage: one Vec<f32> for ALL vectors, node i's data at [i*dim .. (i+1)*dim]
-//TODO: Neighbor lists as u32 instead of usize (half edge memory, 2x per cache line)
 //TODO: Pooled visited-set: reusable epoch-stamped Vec<u32> instead of fresh HashSet per search
 //TODO: Kill the .clone()s in insert while restructuring (folded into this refactor, not before)
 //TODO: Verify vs baseline: recall identical, queries faster — else bisect
@@ -131,7 +129,7 @@ impl DistanceMetric for Cosine {
     //A zero query vector under Cosine now returns distance 1.0 to everything (old code returned 0.0
     fn dist(&self, v1: &[f32], v2: &[f32]) -> f32 {
         let num: f32 = DotProduct.dist(v1, v2);
-        //We are doing `+` because the DotProduct.dist function gives out the -dist as value
+        //We are doing `+` because the DotProduct.dist function gives out the `-dist` as value
         1.0f32 + num
     }
     fn needs_normalize(&self) -> bool { true }
@@ -165,7 +163,7 @@ impl DistanceMetric for DotProduct {
 #[derive(Clone, Debug)]
 pub struct Node {
     id: usize,
-    neighbors: Vec<Vec<usize>>,
+    neighbors: Vec<Vec<u32>>,
 }
 
 pub struct Index {
@@ -175,8 +173,8 @@ pub struct Index {
     //All the vectors present in the List
     nodes: Vec<Option<Node>>,
     //The start point of the HNSW graph
-    start_point: Option<usize>,
-    max_height: u32,
+    start_point: Option<u32>,
+    max_height: usize,
     //m is the maximum number of neighbors a single node is allowed to have at any given layer!
     m: usize,
     //The below attribute controls the quality vs. speed of inserting a new node!
@@ -228,17 +226,15 @@ impl Index {
         &mut self.vectors[id * self.dim..(id + 1) * self.dim]
     }
 
-    pub fn select_neighbors(&self, base_vec: usize, neighbor: &Vec<usize>, m: usize) -> Vec<usize> {
-        let mut survivors: Vec<usize> = Vec::new();
+    pub fn select_neighbors(&self, base_vec: usize, neighbor: &Vec<u32>, m: usize) -> Vec<u32> {
+        let mut survivors: Vec<u32> = Vec::new();
         for &node in neighbor {
             if survivors.len() >= m { break; }
-            let base_vec_data: &[f32] = self.get_vec(base_vec);
-            let node_data: &[f32] = self.get_vec(node);
-            let dist1: f32 = self.metric.dist(node_data, base_vec_data);
+            let node_data: &[f32] = self.get_vec(node as usize);
+            let dist1: f32 = self.metric.dist(node_data, self.get_vec(base_vec));
             let mut b: bool = true;
-
             for &survivor in &survivors {
-                let dist2: f32 = self.metric.dist(node_data, self.get_vec(survivor));
+                let dist2: f32 = self.metric.dist(node_data, self.get_vec(survivor as usize));
                 if dist2 < dist1 {
                     b = false;
                     break;
@@ -265,8 +261,8 @@ impl Index {
             normalize(self.get_vec_mut(id));
         }
         if self.start_point == None {
-            self.start_point = Some(id);
-            self.max_height = level as u32;
+            self.start_point = Some(id as u32);
+            self.max_height = level;
             return;
         }
 
@@ -274,45 +270,45 @@ impl Index {
         //At each layer, it looks at the current node's neighbors.
         //You kinda loook at all the neighbor node in the current node and only move with the
         //neighbor which is the closest one
-        let mut start: usize = self.start_point.unwrap();
+        let mut start: u32 = self.start_point.unwrap();
         for i in (0..=self.max_height).rev() {
-            let mut candidate: Vec<usize> = if i <= level as u32 { self.search_layer(self.get_vec(id), i, start, self.ef_construction)
+            let mut candidate: Vec<u32> = if i <= level { self.search_layer(self.get_vec(id), i, start, self.ef_construction)
             }else { self.search_layer(self.get_vec(id), i, start, 1) };
             if candidate.is_empty() { continue; }
             start = candidate[0];
 
-            if i <= level as u32 {
+            if i <= level {
                 let cap: usize = if i == 0 { 2 * self.m } else { self.m };
                 candidate = self.select_neighbors(id, &candidate, self.m);
-                self.nodes[id].as_mut().unwrap().neighbors[i as usize] = candidate.clone();
+                self.nodes[id].as_mut().unwrap().neighbors[i] = candidate.clone();
                 for &survivor in &candidate {
                     //here i am taking a mutable reference of the self.nodes object
-                    let mut survivor_neighbor: Vec<usize> = self.nodes[survivor].as_mut().unwrap().neighbors[i as usize].clone();
-                    survivor_neighbor.push(id);
+                    let mut survivor_neighbor: Vec<u32> = self.nodes[survivor as usize].as_mut().unwrap().neighbors[i].clone();
+                    survivor_neighbor.push(id as u32);
                     if survivor_neighbor.len() > cap {
-                        let mut temp: Vec<(f32, usize)> = Vec::new();
+                        let mut temp: Vec<(f32, u32)> = Vec::new();
                         for &surv in &survivor_neighbor {
-                            temp.push((self.metric.dist(self.get_vec(surv), self.get_vec(survivor)), surv));
+                            temp.push((self.metric.dist(self.get_vec(surv as usize), self.get_vec(survivor as usize)), surv));
                         }
                         temp.sort_by(|a, b| a.0.total_cmp(&b.0));
                         survivor_neighbor.clear();
                         for (_, addr) in &temp {
                             survivor_neighbor.push(*addr);
                         }
-                       survivor_neighbor = self.select_neighbors(survivor, &survivor_neighbor, cap);
+                       survivor_neighbor = self.select_neighbors(survivor as usize, &survivor_neighbor, cap);
                     }
-                    self.nodes[survivor].as_mut().unwrap().neighbors[i as usize] = survivor_neighbor;
+                    self.nodes[survivor as usize].as_mut().unwrap().neighbors[i] = survivor_neighbor;
                 }
             }
         }
-        if self.max_height < level as u32 {
-            self.max_height = level as u32;
-            self.start_point = Some(id);
+        if self.max_height < level {
+            self.max_height = level;
+            self.start_point = Some(id as u32);
         }
     }
 
     //greedy search at single layer.
-    pub fn search_layer(&self, input_node_data: &[f32], height: u32, current_node_index: usize, ef: usize) -> Vec<usize> {
+    pub fn search_layer(&self, input_node_data: &[f32], height: usize, current_node_index: u32, ef: usize) -> Vec<u32> {
         //We used .as_ref() to conver the &Option<T> into Option<&T>
         //The &Option<T> is because of the &self at the beginning.
         //We use .unwrap() to resolve Option<&T> into &T
@@ -327,12 +323,12 @@ impl Index {
         //The binary heap requires T: Ord instead of f32 so that it can use the cmp function to
         //compare and sort because f32 can be NaN sometimes.
         
-        let mut frontier: BinaryHeap<Reverse<(OrdF32, usize)>> = BinaryHeap::new();
-        let mut board: BinaryHeap<(OrdF32, usize)> = BinaryHeap::new();
-        let mut visited: HashSet<usize> = HashSet::new();
+        let mut frontier: BinaryHeap<Reverse<(OrdF32, u32)>> = BinaryHeap::new();
+        let mut board: BinaryHeap<(OrdF32, u32)> = BinaryHeap::new();
+        let mut visited: HashSet<u32> = HashSet::new();
         
         //Now i am going to insert the current node in both of the heaps:
-        let c0: OrdF32 = OrdF32(self.metric.dist(self.get_vec(current_node_index), input_node_data));
+        let c0: OrdF32 = OrdF32(self.metric.dist(self.get_vec(current_node_index as usize), input_node_data));
         frontier.push(Reverse((c0, current_node_index)));
         board.push((c0, current_node_index));
         visited.insert(current_node_index);
@@ -342,11 +338,11 @@ impl Index {
             if let Some(Reverse((dist, id))) = frontier.pop() {
                 if board.len() >= ef && board.peek().unwrap().0 < dist { break; }
                 //Time to get all the neighbors of this particular id;
-                let neighbors: &Vec<usize> = &self.nodes[id].as_ref().unwrap().neighbors[height as usize];
+                let neighbors: &Vec<u32> = &self.nodes[id as usize].as_ref().unwrap().neighbors[height];
 
                 for &neighbor in neighbors {
                     if !visited.insert(neighbor) { continue; }
-                    let neighbor_curr_dist: OrdF32 = OrdF32(self.metric.dist(self.get_vec(neighbor), input_node_data));
+                    let neighbor_curr_dist: OrdF32 = OrdF32(self.metric.dist(self.get_vec(neighbor as usize), input_node_data));
                     if board.len() >= ef && board.peek().unwrap().0 < neighbor_curr_dist { continue; }
                     frontier.push(Reverse((neighbor_curr_dist, neighbor)));
                     board.push((neighbor_curr_dist, neighbor));
@@ -356,7 +352,7 @@ impl Index {
                 }
             }
         }
-        let mut result: Vec<usize> = Vec::new();
+        let mut result: Vec<u32> = Vec::new();
         loop {
             if board.is_empty() { break; }
             if let Some((_, id)) = board.pop() {
@@ -367,7 +363,7 @@ impl Index {
         result
     }
 
-    pub fn search(&self, input_node_data: &[f32], ef_search: usize, k: usize) -> Vec<usize> {
+    pub fn search(&self, input_node_data: &[f32], ef_search: usize, k: usize) -> Vec<u32> {
         if self.start_point.is_none() { return Vec::new(); }
         //The input_node_data.to_vec() is somewhat kinda not that expensive operation and it should
         //be solved later, but for now it increases nanoseconds against the miliseconds
@@ -375,8 +371,8 @@ impl Index {
         if self.metric.needs_normalize() {
             normalize(&mut query);
         }
-        let mut start: usize = self.start_point.unwrap();
-        let mut candidate: Vec<usize> = Vec::new();
+        let mut start: u32 = self.start_point.unwrap() as u32;
+        let mut candidate: Vec<u32> = Vec::new();
         for i in (0..=self.max_height).rev() {
             if i == 0 {
                 candidate = self.search_layer(&query, i, start, ef_search);
