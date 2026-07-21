@@ -42,7 +42,6 @@
 //TODO: Own recall-vs-QPS curve vs ann-benchmarks.com
 
 //=== HYGIENE (one item resolved by Cosine redesign) ===
-//TODO: max_height -> usize, delete every cast
 //TODO: Delete unused Rng import
 //TODO: Invariant checks: zero orphans at layer 0, all edges valid
 
@@ -162,7 +161,9 @@ impl DistanceMetric for DotProduct {
 #[derive(Clone, Debug)]
 pub struct Node {
     id: usize,
-    neighbors: Vec<Vec<u32>>,
+    neighbor0: Vec<u32>,
+    neighbors: Vec<u32>,
+    
 }
 
 pub struct Index {
@@ -248,9 +249,11 @@ impl Index {
         self.vectors.extend_from_slice(&vec);
         let level: usize = self.random_level();
         let id: usize = self.nodes.len();
-        let neighbors = vec![vec![]; level + 1];
+        let neighbor0 = vec![u32::MAX; 2 * self.m];
+        let neighbors = vec![u32::MAX; (level + 1) * self.m];
         let node = Node {
             id,
+            neighbor0,
             neighbors,
         };
 
@@ -281,11 +284,27 @@ impl Index {
 
             if i <= level {
                 let cap: usize = if i == 0 { 2 * self.m } else { self.m };
-                candidate = self.select_neighbors(id, &candidate, self.m);
-                self.nodes[id].as_mut().unwrap().neighbors[i] = candidate.clone();
+                candidate = self.select_neighbors(id, &candidate, cap);
+                if i == 0 {
+                    for z in 0..candidate.len() {
+                        self.nodes[id].as_mut().unwrap().neighbor0[z] = candidate[z];
+                    }
+                }else {
+                    for z in (i - 1) * cap..i * cap {
+                        self.nodes[id].as_mut().unwrap().neighbors[z] = candidate[z - (i - 1) * cap];
+                    }
+                }
+                //self.nodes[id].as_mut().unwrap().neighbors[i] = candidate.clone();
                 for &survivor in &candidate {
                     //here i am taking a mutable reference of the self.nodes object
-                    let mut survivor_neighbor: Vec<u32> = self.nodes[survivor as usize].as_mut().unwrap().neighbors[i].clone();
+                    //here i have to change the neighbors vector to get what i want:
+                    let mut survivor_neighbor: Vec<u32> = Vec::new();
+                    if i == 0 {
+                        survivor_neighbor = self.nodes[survivor as usize].as_mut().unwrap().neighbor0.clone();
+                    }else {
+                        survivor_neighbor = self.nodes[survivor as usize].as_mut().unwrap().neighbors[(i - 1) * cap..i * cap].clone();
+                    }
+                    //let mut survivor_neighbor: Vec<u32> = self.nodes[survivor as usize].as_mut().unwrap().neighbors[i].clone();
                     survivor_neighbor.push(id as u32);
                     if survivor_neighbor.len() > cap {
                         let mut temp: Vec<(f32, u32)> = Vec::new();
@@ -299,7 +318,12 @@ impl Index {
                         }
                        survivor_neighbor = self.select_neighbors(survivor as usize, &survivor_neighbor, cap);
                     }
-                    self.nodes[survivor as usize].as_mut().unwrap().neighbors[i] = survivor_neighbor;
+                    if i == 0 {
+                        self.nodes[survivor as usize].as_mut().unwrap().neighbor0 = survivor_neighbor;
+                    }else {
+                        self.nodes[survivor as usize].as_mut().unwrap().neighbors[(i - 1) * cap..i * cap] = survivor_neighbor;
+                    }
+                    //self.nodes[survivor as usize].as_mut().unwrap().neighbors[i] = survivor_neighbor;
                 }
             }
         }
@@ -339,7 +363,13 @@ impl Index {
             if let Some(Reverse((dist, id))) = frontier.pop() {
                 if board.len() >= ef && board.peek().unwrap().0 < dist { break; }
                 //Time to get all the neighbors of this particular id;
-                let neighbors: &Vec<u32> = &self.nodes[id as usize].as_ref().unwrap().neighbors[height];
+                let mut neighbors: &Vec<u32> = Vec::new();
+                if height == 0 {
+                    neighbors = &self.nodes[id as usize].as_ref().unwrap().neighbor0;
+                }else {
+                    neighbors = &self.nodes[id as usize].as_ref().unwrap().neighbors[(height - 1) * self.m..height * self.m];
+                }
+                //let neighbors: &Vec<u32> = &self.nodes[id as usize].as_ref().unwrap().neighbors[height];
 
                 for &neighbor in neighbors {
                     if visited[neighbor as usize] == count { continue; }
