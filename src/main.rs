@@ -1,5 +1,4 @@
-//Mutability isn't a property the variable carries around. It's a property of the reference.
-//Option and Result are an enums btw
+//Mutability isn't a property the variable carries around. It's a property of the reference.  Option and Result are an enums btw
 //A ref to a struct let's us access the fields, but it doesn't gives us the references to them.
 //Reaching a field just names us places - we don't own it.
 //&path if mentioned explicitly will give us reference to the data till the path ends.
@@ -51,9 +50,8 @@
 // TODO : keepPrunedConnections — backfill empty slots with best rejected candidates
 // TODO : alpha‑pruning parameter (alpha=1.0 current; try 1.2 like DiskANN, benchmark recall)
 
-//=== METRIC‑SPECIFIC PERFORMANCE (cosine gap reduction) ===
-// TODO : Cosine distance optimisation – after normalise‑on‑insert, store only normalised vectors and replace Cosine::dist 
-//        with an inlined dot‑product‑plus‑offset (avoid double trait dispatch). Goal: cosine query speed ≈ Euclidean.
+//=== METRIC‑SPECIFIC PERFORMANCE (cosine gap reduction) === 
+// TODO : Cosine distance optimisation – after normalise‑on‑insert, store only normalised vectors and replace Cosine::dist with an inlined dot‑product‑plus‑offset (avoid double trait dispatch). Goal: cosine query speed ≈ Euclidean.
 
 //=== SCALABLE PERFORMANCE (major speedups after recall is solid) ===
 // TODO : Quantization f32 -> int8: per‑vector scale, calibrate range, then the recall ladder
@@ -73,7 +71,14 @@
 
 use std::collections::BinaryHeap;
 use std::cmp::Reverse;
-use rand;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
+
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+
+//ptr as *const i8 is the address of the next element to fetch which is prefetch address
+//_MM_HINT_T0 tells the data should be in L1 cache and so on in L2, L3.
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct OrdF32(f32);
@@ -196,7 +201,10 @@ pub struct Index {
     vectors: Vec<f32>,
     dim: usize,
     //All the vectors present in the List
-    nodes: Vec<Option<Node>>,
+    //nodes: Vec<Option<Node>>,
+    //One flatten nodes array for faster access
+    nodes: Vec<u32>,
+    stride: u32,
     //The start point of the HNSW graph
     start_point: Option<u32>,
     max_height: usize,
@@ -215,6 +223,7 @@ pub struct Index {
     //The other 8 bytes stores the address of the vtable which contains the address of all the
     //traits of this particular struct, because rust doesn't know which dist function.
     metric: Box<dyn DistanceMetric>,
+    rng: StdRng,
 }
 
 //Box<dyn DistanceMetric> is a data type btw
@@ -231,12 +240,13 @@ impl Index {
             m,
             ef_construction,
             metric,
+            rng: StdRng::seed_from_u64(42),
         }
     }
 
     //This function will basically roll a weighted die and decide, like in which layer the vector will fall.
-    pub fn random_level(&self) -> usize {
-        let r: f64 = rand::random();
+    pub fn random_level(&mut self) -> usize {
+        let r: f64 = self.rng.random();
         if r == 0.0 || self.m == 1 || self.m == 0 { return 0; }
         let ml: f64 = 1.0 / (self.m as f64).ln();
         let lev: usize = (-r.ln() * ml).floor() as usize;
@@ -273,16 +283,13 @@ impl Index {
     pub fn insert_vec(&mut self, vec: Vec<f32>) {
         self.vectors.extend_from_slice(&vec);
         let level: usize = self.random_level();
-        let id: usize = self.nodes.len();
-        let neighbor0 = vec![u32::MAX; 2 * self.m];
-        let neighbors = vec![u32::MAX; (level) * self.m];
-        let node = Node {
-            id,
-            neighbor0,
-            neighbors,
-        };
 
-        self.nodes.push(Some(node));
+        self.stride = 2 * self.m + (self.max_height) * self.m;
+
+        let neighbors: Vec<u32> = vec![u32::MAX; self.stride];
+        self.nodes.extend_from_slice(&neighbors);
+
+        let id: usize = self.nodes.len() / stride;
 
         if self.metric.needs_normalize() {
             normalize(self.get_vec_mut(id));
@@ -391,19 +398,34 @@ impl Index {
             if frontier.is_empty() { break; }
             if let Some(Reverse((dist, id))) = frontier.pop() {
                 if board.len() >= ef && board.peek().unwrap().0 < dist { break; }
-                //Time to get all the neighbors of this particular id;
+
+                let s: usize = (id * self.stride) as usize;
                 let neighbors: &[u32] = if height == 0 {
-                    &self.nodes[id as usize].as_ref().unwrap().neighbor0
+                    &self.nodes[s..s + 2 * self.m]
                 }else {
-                    &self.nodes[id as usize].as_ref().unwrap().neighbors[(height - 1) * self.m..height * self.m]
+                    &self.nodes[(s + 2 * self.m) + ((height - 1) * self.m )..(s + 2 * self.m) + (height * self.m)]
                 };
-                for &neighbor in neighbors {
-                    if neighbor == u32::MAX || visited[neighbor as usize] == count { continue; }
-                    else { visited[neighbor as usize] = count; }
-                    let neighbor_curr_dist: OrdF32 = OrdF32(self.metric.dist(self.get_vec(neighbor as usize), input_node_data));
+
+
+                for i in 0..neighbors.len() {
+                    //This is the prefetch code which fetches the next data in the L1 cache!
+                    if i + 1 < neighbors.len() {
+                        let nxt = neighbors[i + 1];
+                        if nxt != u32::MAX && (nxt as usize) < self.nodes.len() {
+                            unsafe {
+                                _mm_prefetch(self.vectors.as_ptr().add(nxt as usize * self.dim) as *const i8, _MM_HINT_T0);
+                                _mm_prefetch(visited.as_ptr().add(nxt as usize) as *const i8, _MM_HINT_T0);
+                            }
+                        }
+                    }
+
+                    if neighbors[i] == u32::MAX || visited[neighbors[i] as usize] == count { continue; }
+                    else { visited[neighbors[i] as usize] = count; }
+
+                    let neighbor_curr_dist: OrdF32 = OrdF32(self.metric.dist(self.get_vec(neighbors[i] as usize), input_node_data));
                     if board.len() >= ef && board.peek().unwrap().0 < neighbor_curr_dist { continue; }
-                    frontier.push(Reverse((neighbor_curr_dist, neighbor)));
-                    board.push((neighbor_curr_dist, neighbor));
+                    frontier.push(Reverse((neighbor_curr_dist, neighbors[i])));
+                    board.push((neighbor_curr_dist, neighbors[i]));
                     if board.len() > ef {
                         board.pop();
                     }
